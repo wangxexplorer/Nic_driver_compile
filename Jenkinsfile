@@ -3,7 +3,17 @@ pipeline {
 
     parameters {
         string(name: 'password', defaultValue: '', description: '远程服务器SSH密码（所有OS使用相同密码）')
-        string(name: 'driver_version', defaultValue: '', description: '驱动版本')
+        string(name: 'driver_version', defaultValue: '', description: '默认驱动版本号（所有驱动通用）')
+        text(
+            name: 'DRIVER_VERSION_MAP',
+            defaultValue: '',
+            description: '''可选：差异化驱动版本映射，格式：驱动名:版本号，每行一个。
+未列出的驱动使用默认 driver_version。
+示例：
+mcepf:1.1.14
+mrdma:2.0.1
+rnpgbe:1.2.0'''
+        )
         text(
             name: 'OS_CONFIG',
             defaultValue: '''AnolisOS-8.6-QU1:10.84.10.188
@@ -131,6 +141,29 @@ kylinsec-3.5.2:10.84.10.189
                         echo "  - ${drv}"
                     }
 
+                    // ====== 解析驱动版本映射 ======
+                    def driverVersionMap = [:]
+                    if (params.DRIVER_VERSION_MAP?.trim()) {
+                        def mapLines = params.DRIVER_VERSION_MAP.trim().split('\n')
+                        mapLines.each { mapLine ->
+                            def trimmedMapLine = mapLine.trim()
+                            if (trimmedMapLine && !trimmedMapLine.startsWith('#')) {
+                                def mapParts = trimmedMapLine.split(':')
+                                if (mapParts.length >= 2) {
+                                    def mapDriverName = mapParts[0].trim()
+                                    def mapDriverVersion = mapParts[1].trim()
+                                    if (mapDriverName && mapDriverVersion) {
+                                        driverVersionMap[mapDriverName] = mapDriverVersion
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    def getDriverVersion = { driverName ->
+                        return driverVersionMap.get(driverName, params.driver_version)
+                    }
+
                     // ====== 构建并行任务 ======
                     def parallelTasks = [:]
 
@@ -174,7 +207,8 @@ kylinsec-3.5.2:10.84.10.189
                                                 return
                                             }
 
-                                            echo "[${osName}] >>> 开始编译驱动: ${driverName}"
+                                            def drvVersion = getDriverVersion(driverName)
+                                            echo "[${osName}] >>> 开始编译驱动: ${driverName} (版本: ${drvVersion})"
 
                                             try {
                                                 // 1. 清理旧文件
@@ -185,24 +219,24 @@ kylinsec-3.5.2:10.84.10.189
 
                                                 // 2. 传输驱动包
                                                 sh """
-                                                    sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} /home/kernel_driver/${driverName}-${params.driver_version}.tar.gz root@${osIp}:/home
+                                                    sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} /home/kernel_driver/${driverName}-${drvVersion}.tar.gz root@${osIp}:/home
                                                 """
                                                 sleep 5
 
                                                 // 3. 解压
                                                 sh """
-                                                    sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/; tar xvf ${driverName}-${params.driver_version}.tar.gz"
+                                                    sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/; tar xvf ${driverName}-${drvVersion}.tar.gz"
                                                 """
                                                 sleep 2
 
                                                 // 4. 编译（mrdma 特殊处理）
                                                 if (driverName == 'mrdma') {
                                                     sh """
-                                                        sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/${driverName}-${params.driver_version}; ./mrdma_install.sh"
+                                                        sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/${driverName}-${drvVersion}; ./mrdma_install.sh"
                                                     """
                                                 } else {
                                                     sh """
-                                                        sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/${driverName}-${params.driver_version}/src; make"
+                                                        sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd /home/${driverName}-${drvVersion}/src; make"
                                                     """
                                                 }
 
