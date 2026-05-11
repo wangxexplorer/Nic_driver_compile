@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'password', defaultValue: '', description: '远程服务器SSH密码（所有OS使用相同密码）')
+        string(name: 'password', defaultValue: '123456', description: '远程服务器SSH密码（所有OS使用相同密码）')
         string(name: 'driver_version', defaultValue: '', description: '默认驱动版本号（所有驱动通用）')
         text(
             name: 'DRIVER_VERSION_MAP',
