@@ -198,11 +198,13 @@ kylinsec-3.5.2:10.84.10.189
                                         }
 
                                         def mcepfFailed = false
+                                        def vmFailedDrivers = []
 
                                         vmDrivers.each { driverName ->
                                             // 如果 mcepf 失败且当前是 mrdma，则跳过
                                             if (mcepfFailed && driverName == 'mrdma') {
                                                 echo "[${osName}] ⚠️ 跳过 ${driverName}，因为前置依赖 mcepf 编译失败"
+                                                vmFailedDrivers.add(driverName)
                                                 currentBuild.result = 'UNSTABLE'
                                                 return
                                             }
@@ -245,19 +247,27 @@ kylinsec-3.5.2:10.84.10.189
                                             } catch (Exception e) {
                                                 echo "[${osName}] ❌ 驱动 ${driverName} 编译失败: ${e.getMessage()}"
 
+                                                vmFailedDrivers.add(driverName)
+                                                currentBuild.result = 'UNSTABLE'
+
                                                 // 标记 mcepf 失败，影响后续 mrdma
                                                 if (driverName == 'mcepf') {
                                                     mcepfFailed = true
                                                 }
-
-                                                currentBuild.result = 'UNSTABLE'
-                                                throw e
+                                                // 不 throw，继续编译下一个驱动（普通驱动互相独立）
                                             }
                                         }
 
-                                        echo "============================"
-                                        echo "✅ ${osName} 所有驱动编译完成！"
-                                        echo "============================"
+                                        if (!vmFailedDrivers.isEmpty()) {
+                                            echo "============================"
+                                            echo "❌ ${osName} 部分驱动编译失败: ${vmFailedDrivers.join(', ')}"
+                                            echo "============================"
+                                            error "[${osName}] 以下驱动编译失败: ${vmFailedDrivers.join(', ')}"
+                                        } else {
+                                            echo "============================"
+                                            echo "✅ ${osName} 所有驱动编译完成！"
+                                            echo "============================"
+                                        }
 
                                     } catch (Exception e) {
                                         echo "============================"
