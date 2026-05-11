@@ -1,0 +1,236 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'password', defaultValue: 'Kylin@123', description: '远程服务器SSH密码（所有OS使用相同密码）')
+        string(name: 'driver_version', defaultValue: 'rnp-1.1.14', description: '驱动版本号，例如：1.0.0')
+        string(name: 'version', defaultValue: '1.1.14', description: '打包版本号')
+        text(
+            name: 'OS_CONFIG', 
+            defaultValue: '''BCLinux-21.10:10.86.10.218
+anolisos-8.6:10.86.10.250
+anolisos-8.9:10.86.10.227
+anolisos-8.2:10.86.10.204
+anolisos-8.6.03p45:10.86.10.237
+anolisos-8.8:10.86.10.201
+BCLinux-190529:10.86.10.230
+BCLinux-230308:10.86.10.249
+BCLinux-230324:10.86.10.240
+BCLinux-230425:10.86.10.239
+BCLinux-forEuler-21.10:10.86.10.247
+BCLinux-R8:10.86.10.213
+BCLinux-R8-210617:10.86.10.226
+bulinux-oe21.10:10.86.10.243
+Centos-7-1804:10.86.10.208
+Centos-7-1908:10.86.10.252
+Centos-7.7:10.86.10.216
+Centos-8.1-20220126:10.86.10.228
+Centos-8.1-1911:10.86.10.203
+h3clinux:10.86.10.255
+h3linux:10.86.10.246
+ky10sp2:10.86.10.234
+Kylin-Server-10-SP2:10.86.10.205
+''', 
+            description: 'OS配置列表，格式：OS名称:IP地址，每行一个。支持注释行（以#开头）。示例：\nubuntu2004:192.168.1.10\ncentos7:192.168.1.20'
+        )
+        booleanParam(name: 'FAIL_FAST', defaultValue: false, description: '是否在一个OS打包失败时立即终止其他OS的打包（默认否，即尽可能完成所有OS的打包）')
+        string(name: 'TIMEOUT_MINUTES', defaultValue: '30', description: '单个OS打包超时时间（分钟）')
+    }
+
+    environment {
+        REMOTE_WORK_DIR = '/home'
+        LOCAL_PACKAGE_DIR = '/home/dkms_deb_package'
+    }
+
+    stages {
+        stage('多OS并行打包') {
+            steps {
+                script {
+                    // ====== 解析OS配置 ======
+                    def osConfigList = []
+                    def lines = params.OS_CONFIG.trim().split('\n')
+                    
+                    lines.each { line ->
+                        def trimmedLine = line.trim()
+                        if (trimmedLine && !trimmedLine.startsWith('#')) {
+                            def parts = trimmedLine.split(':')
+                            if (parts.length >= 2) {
+                                def osName = parts[0].trim()
+                                def osIp = parts[1].trim()
+                                // 支持 OS名称:IP:端口 格式，默认端口22
+                                def osPort = parts.length >= 3 ? parts[2].trim() : '22'
+                                
+                                if (osName && osIp) {
+                                    osConfigList.add([
+                                        name: osName,
+                                        ip: osIp,
+                                        port: osPort
+                                    ])
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (osConfigList.isEmpty()) {
+                        error "OS配置为空或格式错误，请检查OS_CONFIG参数。格式要求：OS名称:IP地址，每行一个"
+                    }
+                    
+                    echo "将要并行构建的OS列表（共 ${osConfigList.size()} 个）："
+                    osConfigList.each { os ->
+                        echo "  - ${os.name}: ${os.ip}:${os.port}"
+                    }
+                    
+                    // ====== 构建并行任务 ======
+                    def parallelTasks = [:]
+                    
+                    osConfigList.each { osInfo ->
+                        def osName = osInfo.name
+                        def osIp = osInfo.ip
+                        def osPort = osInfo.port
+                        
+                        parallelTasks[osName] = {
+                            stage("打包-${osName}") {
+                                timeout(time: params.TIMEOUT_MINUTES.toInteger(), unit: 'MINUTES') {
+                                    script {
+                                        echo "============================"
+                                        echo "开始在 ${osName}(${osIp}:${osPort}) 上打包..."
+                                        echo "============================"
+                                        
+                                        def resultDir = "${LOCAL_PACKAGE_DIR}/${osName}/${params.driver_version}/build-${BUILD_ID}"
+                                        
+                                        // 创建本地存储目录
+                                        sh """
+                                            mkdir -p ${resultDir}
+                                        """
+                                        
+                                        try {
+                                            // 1. 清理旧文件
+                                            echo "[${osName}] 清理旧文件..."
+                                            sh """
+                                                sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "rm -rf ${REMOTE_WORK_DIR}/helloworld*.deb"
+                                                sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "rm -rf ${REMOTE_WORK_DIR}/rpm_build"
+                                            """
+                                            sleep 2
+                                            
+                                            // 2. 传输打包脚本
+                                            echo "[${osName}] 传输打包脚本..."
+                                            sh """
+                                                sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} ${LOCAL_PACKAGE_DIR}/dkms_deb.sh root@${osIp}:${REMOTE_WORK_DIR}
+                                                sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} ${LOCAL_PACKAGE_DIR}/rpm_build.sh root@${osIp}:${REMOTE_WORK_DIR}
+                                                sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} ${LOCAL_PACKAGE_DIR}/os_pkt_build.sh root@${osIp}:${REMOTE_WORK_DIR}
+                                            """
+                                            
+                                            // 3. 设置脚本权限
+                                            sh """
+                                                sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd ${REMOTE_WORK_DIR}; chmod -R 777 rpm_build.sh; chmod -R 777 os_pkt_build.sh"
+                                            """
+                                            sleep 2
+                                            
+                                            // 4. 传输驱动文件
+                                            echo "[${osName}] 传输驱动文件..."
+                                            sh """
+                                                sshpass -p '${params.password}' scp -o StrictHostKeyChecking=no -P ${osPort} ${LOCAL_PACKAGE_DIR}/${params.driver_version}.tar.gz root@${osIp}:${REMOTE_WORK_DIR}
+                                            """
+                                            sleep 2
+                                            
+                                            // 5. 解压驱动包
+                                            echo "[${osName}] 解压驱动包..."
+                                            sh """
+                                                sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd ${REMOTE_WORK_DIR}; tar zxvf ${params.driver_version}.tar.gz"
+                                            """
+                                            
+                                            // 6. 执行打包脚本
+                                            echo "[${osName}] 执行打包脚本..."
+                                            sh """
+                                                sshpass -p '${params.password}' ssh -o StrictHostKeyChecking=no -p ${osPort} root@${osIp} "cd ${REMOTE_WORK_DIR}; ./os_pkt_build.sh ${params.version} ${params.driver_version}"
+                                            """
+                                            
+                                            // 7. 回传构建结果
+                                            echo "[${osName}] 回传构建结果..."
+                                            sh """
+                                                sshpass -p '${params.password}' scp -r -o StrictHostKeyChecking=no -P ${osPort} root@${osIp}:${REMOTE_WORK_DIR}/rpm_build/* ${resultDir}/ || echo "警告：${osName} 回传结果可能不完整"
+                                            """
+                                            
+                                            echo "============================"
+                                            echo "✅ ${osName} 打包完成！"
+                                            echo "============================"
+                                            
+                                        } catch (Exception e) {
+                                            echo "============================"
+                                            echo "❌ ${osName} 打包失败: ${e.getMessage()}"
+                                            echo "============================"
+                                            // 标记构建为UNSTABLE但不立即失败（除非设置了failFast）
+                                            currentBuild.result = 'UNSTABLE'
+                                            throw e
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 执行并行任务
+                    parallelTasks['failFast'] = params.FAIL_FAST
+                    parallel parallelTasks
+                }
+            }
+        }
+
+        stage('打包结果汇总') {
+            steps {
+                script {
+                    echo "========================================="
+                    echo "📦 构建结果汇总"
+                    echo "========================================="
+                    echo "构建ID: ${BUILD_ID}"
+                    echo "驱动版本: ${params.driver_version}"
+                    echo "版本号: ${params.version}"
+                    echo "========================================="
+                    
+                    // 汇总各OS构建结果
+                    sh '''
+                        echo "=== 各OS打包结果目录 ==="
+                        for dir in ''' + LOCAL_PACKAGE_DIR + '''/*/''' + params.driver_version + '''/build-''' + BUILD_ID + '''; do
+                            if [ -d "$dir" ]; then
+                                os_name=$(basename $(dirname $(dirname "$dir")))
+                                echo ""
+                                echo "--- OS: $os_name ---"
+                                echo "路径: $dir"
+                                echo "文件列表:"
+                                ls -la "$dir" 2>/dev/null || echo "  (目录为空或不存在)"
+                                echo "文件数量: $(ls "$dir" 2>/dev/null | wc -l)"
+                            fi
+                        done
+                        
+                        echo ""
+                        echo "=== 构建完成 ==="
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "构建结束 - 状态: ${currentBuild.result}"
+                echo "========================================="
+                
+                // 可以在这里添加邮件通知、Slack通知等
+                // emailext subject: "打包完成 - ${currentBuild.result}", 
+                //          body: "构建ID: ${BUILD_ID}\n驱动版本: ${params.driver_version}\n版本号: ${params.version}", 
+                //          to: "your-email@example.com"
+            }
+        }
+        success {
+            echo "✅ 所有OS打包成功！"
+        }
+        unstable {
+            echo "⚠️ 部分OS打包失败，请检查日志！"
+        }
+        failure {
+            echo "❌ 打包流程出现严重错误！"
+        }
+    }
+}
+
